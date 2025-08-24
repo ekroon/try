@@ -181,9 +181,34 @@ func filterProjects(projects []string, search string) []string {
 	return filtered
 }
 
+func expandPath(path string) (string, error) {
+	if !strings.HasPrefix(path, "~") {
+		return path, nil
+	}
+	
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(home, path[2:]), nil
+	}
+	
+	if path == "~" {
+		return os.UserHomeDir()
+	}
+	
+	return "", fmt.Errorf("expansion of ~user paths not supported, use absolute path instead: %s", path)
+}
+
 func getProjectsDir() string {
 	if dir := os.Getenv("TRY_PROJECTS_DIR"); dir != "" {
-		return dir
+		expanded, err := expandPath(dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error expanding TRY_PROJECTS_DIR: %v\n", err)
+			os.Exit(1)
+		}
+		return expanded
 	}
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "projects")
