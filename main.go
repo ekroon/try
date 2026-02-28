@@ -155,15 +155,30 @@ func getProjects(projectsDir string) ([]string, error) {
 		return nil, err
 	}
 
-	var projects []string
+	type projectEntry struct {
+		name    string
+		modTime time.Time
+	}
+	var projects []projectEntry
 	for _, entry := range entries {
 		if entry.IsDir() {
-			projects = append(projects, entry.Name())
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			projects = append(projects, projectEntry{name: entry.Name(), modTime: info.ModTime()})
 		}
 	}
-	
-	sort.Strings(projects)
-	return projects, nil
+
+	sort.Slice(projects, func(i, j int) bool {
+		return projects[i].modTime.After(projects[j].modTime)
+	})
+
+	names := make([]string, len(projects))
+	for i, p := range projects {
+		names[i] = p.name
+	}
+	return names, nil
 }
 
 func filterProjects(projects []string, search string) []string {
@@ -201,36 +216,35 @@ func expandPath(path string) (string, error) {
 	return "", fmt.Errorf("expansion of ~user paths not supported, use absolute path instead: %s", path)
 }
 
-func getProjectsDir() string {
+func getProjectsDir() (string, error) {
 	if dir := os.Getenv("TRY_PROJECTS_DIR"); dir != "" {
 		expanded, err := expandPath(dir)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error expanding TRY_PROJECTS_DIR: %v\n", err)
-			os.Exit(1)
+			return "", fmt.Errorf("error expanding TRY_PROJECTS_DIR: %w", err)
 		}
-		return expanded
+		return expanded, nil
 	}
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "projects")
+	return filepath.Join(home, "projects"), nil
 }
 
-func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <command>\n", os.Args[0])
+func run(args []string) int {
+	if len(args) < 2 {
+		fmt.Fprintf(os.Stderr, "Usage: %s <command>\n", args[0])
 		fmt.Fprintf(os.Stderr, "Commands:\n")
 		fmt.Fprintf(os.Stderr, "  init  Output shell function\n")
 		fmt.Fprintf(os.Stderr, "  cd    Interactive project selector\n")
-		os.Exit(1)
+		return 1
 	}
 
-	command := os.Args[1]
+	command := args[1]
 	
 	switch command {
 	case "init":
 		execPath, err := os.Executable()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error getting executable path: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
 		fmt.Printf(`try() {
     local output
@@ -245,12 +259,16 @@ func main() {
 }
 `, execPath)
 	case "cd":
-		projectsDir := getProjectsDir()
+		projectsDir, err := getProjectsDir()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			return 1
+		}
 		
 		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening /dev/tty: %v", err)
-			os.Exit(1)
+			return 1
 		}
 		defer tty.Close()
 		
@@ -263,10 +281,15 @@ func main() {
 			tea.WithOutput(tty))
 		if _, err := p.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error running program: %v", err)
-			os.Exit(1)
+			return 1
 		}
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
-		os.Exit(1)
+		return 1
 	}
+	return 0
+}
+
+func main() {
+	os.Exit(run(os.Args))
 }
