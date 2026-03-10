@@ -51,11 +51,26 @@ export TRY_PROJECTS_DIR="/path/to/your/projects"
 
 Default: `~/projects`
 
+## Project layout
+
+New projects created from the CLI use a date bucket layout:
+
+```text
+~/projects/YYYY-MM-DD/project-name
+```
+
+Existing legacy directories that use a date-prefixed name are still supported and remain selectable:
+
+```text
+~/projects/YYYY-MM-DD-project-name
+```
+
 ## Features
 
 - 🔍 Substring search through project directories
 - ⚡ Fast navigation with keyboard shortcuts  
-- 📁 Create new projects with date prefixes (YYYY-MM-DD-name)
+- 📁 Create new projects in `YYYY-MM-DD/project` date buckets
+- ♻️ Continue supporting existing `YYYY-MM-DD-project` directories
 - 🎨 Beautiful terminal interface
 - 🐚 Shell integration that actually changes your directory
 

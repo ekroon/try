@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -14,6 +15,10 @@ import (
 )
 
 var (
+	version = "dev"
+	commit  = "none"
+	date    = "unknown"
+
 	titleStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#FFFFFF"}).
@@ -37,11 +42,22 @@ var (
 )
 
 type model struct {
-	choices   []string
-	cursor    int
-	search    string
-	filtered  []string
+	choices     []projectEntry
+	cursor      int
+	search      string
+	filtered    []projectEntry
 	projectsDir string
+}
+
+type projectEntry struct {
+	displayName  string
+	relativePath string
+	fullPath     string
+}
+
+type discoveredProject struct {
+	projectEntry
+	modTime time.Time
 }
 
 func initialModel(projectsDir string) model {
@@ -66,8 +82,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if len(m.filtered) > 0 && m.cursor < len(m.filtered) {
 				selectedProject := m.filtered[m.cursor]
-				projectPath := filepath.Join(m.projectsDir, selectedProject)
-				fmt.Printf("cd %q", projectPath)
+				fmt.Printf("cd %q", selectedProject.fullPath)
 				return m, tea.Quit
 			}
 			return m, nil
@@ -82,9 +97,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+n":
 			if len(m.search) > 0 {
 				today := time.Now().Format("2006-01-02")
-				newProjectName := fmt.Sprintf("%s-%s", today, m.search)
-				newProjectPath := filepath.Join(m.projectsDir, newProjectName)
-				
+				newProjectPath := filepath.Join(m.projectsDir, today, m.search)
+
 				if err := os.MkdirAll(newProjectPath, 0755); err == nil {
 					fmt.Printf("cd %q", newProjectPath)
 					return m, tea.Quit
@@ -116,11 +130,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	s := titleStyle.Render("try - Project Selector")
 	s += "\n\n"
-	
+
 	if len(m.search) > 0 {
 		s += fmt.Sprintf("Search: %s\n", m.search)
 	}
-	
+
 	if len(m.filtered) == 0 {
 		if len(m.search) > 0 {
 			s += helpStyle.Render("No projects found. Press 'C-n' to create a new project with this name.")
@@ -132,9 +146,9 @@ func (m model) View() string {
 			cursor := " "
 			if m.cursor == i {
 				cursor = ">"
-				s += selectedItemStyle.Render(fmt.Sprintf("%s %s", cursor, choice))
+				s += selectedItemStyle.Render(fmt.Sprintf("%s %s", cursor, choice.displayName))
 			} else {
-				s += itemStyle.Render(fmt.Sprintf("%s %s", cursor, choice))
+				s += itemStyle.Render(fmt.Sprintf("%s %s", cursor, choice.displayName))
 			}
 			s += "\n"
 		}
@@ -144,10 +158,12 @@ func (m model) View() string {
 	return s
 }
 
-func getProjects(projectsDir string) ([]string, error) {
+func getProjects(projectsDir string) ([]projectEntry, error) {
 	if _, err := os.Stat(projectsDir); os.IsNotExist(err) {
-		os.MkdirAll(projectsDir, 0755)
-		return []string{}, nil
+		if err := os.MkdirAll(projectsDir, 0755); err != nil {
+			return nil, err
+		}
+		return []projectEntry{}, nil
 	}
 
 	entries, err := os.ReadDir(projectsDir)
@@ -155,41 +171,96 @@ func getProjects(projectsDir string) ([]string, error) {
 		return nil, err
 	}
 
-	type projectEntry struct {
-		name    string
-		modTime time.Time
-	}
-	var projects []projectEntry
+	var projects []discoveredProject
 	for _, entry := range entries {
-		if entry.IsDir() {
-			info, err := entry.Info()
+		if !entry.IsDir() {
+			continue
+		}
+
+		if isDateBucket(entry.Name()) {
+			bucketProjects, err := getProjectsInDateBucket(projectsDir, entry.Name())
 			if err != nil {
 				continue
 			}
-			projects = append(projects, projectEntry{name: entry.Name(), modTime: info.ModTime()})
+			projects = append(projects, bucketProjects...)
+			continue
 		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		projects = append(projects, discoveredProject{
+			projectEntry: projectEntry{
+				displayName:  entry.Name(),
+				relativePath: entry.Name(),
+				fullPath:     filepath.Join(projectsDir, entry.Name()),
+			},
+			modTime: info.ModTime(),
+		})
 	}
 
 	sort.Slice(projects, func(i, j int) bool {
 		return projects[i].modTime.After(projects[j].modTime)
 	})
 
-	names := make([]string, len(projects))
+	names := make([]projectEntry, len(projects))
 	for i, p := range projects {
-		names[i] = p.name
+		names[i] = p.projectEntry
 	}
 	return names, nil
 }
 
-func filterProjects(projects []string, search string) []string {
+func getProjectsInDateBucket(projectsDir string, bucketName string) ([]discoveredProject, error) {
+	bucketPath := filepath.Join(projectsDir, bucketName)
+	entries, err := os.ReadDir(bucketPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var projects []discoveredProject
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		relativePath := path.Join(bucketName, entry.Name())
+		projects = append(projects, discoveredProject{
+			projectEntry: projectEntry{
+				displayName:  relativePath,
+				relativePath: relativePath,
+				fullPath:     filepath.Join(bucketPath, entry.Name()),
+			},
+			modTime: info.ModTime(),
+		})
+	}
+
+	return projects, nil
+}
+
+func isDateBucket(name string) bool {
+	parsed, err := time.Parse("2006-01-02", name)
+	if err != nil {
+		return false
+	}
+	return parsed.Format("2006-01-02") == name
+}
+
+func filterProjects(projects []projectEntry, search string) []projectEntry {
 	if search == "" {
 		return projects
 	}
-	
-	var filtered []string
+
+	var filtered []projectEntry
 	searchLower := strings.ToLower(search)
 	for _, project := range projects {
-		if strings.Contains(strings.ToLower(project), searchLower) {
+		if strings.Contains(strings.ToLower(project.displayName), searchLower) {
 			filtered = append(filtered, project)
 		}
 	}
@@ -200,7 +271,7 @@ func expandPath(path string) (string, error) {
 	if !strings.HasPrefix(path, "~") {
 		return path, nil
 	}
-	
+
 	if strings.HasPrefix(path, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -208,11 +279,11 @@ func expandPath(path string) (string, error) {
 		}
 		return filepath.Join(home, path[2:]), nil
 	}
-	
+
 	if path == "~" {
 		return os.UserHomeDir()
 	}
-	
+
 	return "", fmt.Errorf("expansion of ~user paths not supported, use absolute path instead: %s", path)
 }
 
@@ -238,7 +309,7 @@ func run(args []string) int {
 	}
 
 	command := args[1]
-	
+
 	switch command {
 	case "init":
 		execPath, err := os.Executable()
@@ -264,19 +335,19 @@ func run(args []string) int {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			return 1
 		}
-		
+
 		tty, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error opening /dev/tty: %v", err)
 			return 1
 		}
 		defer tty.Close()
-		
+
 		// Force TrueColor to ensure colors work properly in subshells
 		lipgloss.SetColorProfile(termenv.TrueColor)
-		
-		p := tea.NewProgram(initialModel(projectsDir), 
-			tea.WithAltScreen(), 
+
+		p := tea.NewProgram(initialModel(projectsDir),
+			tea.WithAltScreen(),
 			tea.WithInput(tty),
 			tea.WithOutput(tty))
 		if _, err := p.Run(); err != nil {

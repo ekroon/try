@@ -13,32 +13,54 @@ import (
 
 // --- filterProjects tests ---
 
-func TestFilterProjects_EmptySearch(t *testing.T) {
-	projects := []string{"alpha", "beta", "gamma"}
-	got := filterProjects(projects, "")
-	if len(got) != len(projects) {
-		t.Fatalf("expected %d projects, got %d", len(projects), len(got))
+func newTestProjects(projectsDir string, names []string) []projectEntry {
+	projects := make([]projectEntry, 0, len(names))
+	for _, name := range names {
+		projects = append(projects, projectEntry{
+			displayName:  name,
+			relativePath: name,
+			fullPath:     filepath.Join(projectsDir, filepath.FromSlash(name)),
+		})
 	}
-	for i, p := range projects {
-		if got[i] != p {
-			t.Errorf("index %d: expected %q, got %q", i, p, got[i])
+	return projects
+}
+
+func projectDisplayNames(projects []projectEntry) []string {
+	names := make([]string, len(projects))
+	for i, project := range projects {
+		names[i] = project.displayName
+	}
+	return names
+}
+
+func assertProjectNames(t *testing.T, got []projectEntry, want []string) {
+	t.Helper()
+
+	gotNames := projectDisplayNames(got)
+	if len(gotNames) != len(want) {
+		t.Fatalf("expected %d projects, got %d (%v)", len(want), len(gotNames), gotNames)
+	}
+	for i, expected := range want {
+		if gotNames[i] != expected {
+			t.Errorf("index %d: expected %q, got %q (all: %v)", i, expected, gotNames[i], gotNames)
 		}
 	}
 }
 
+func TestFilterProjects_EmptySearch(t *testing.T) {
+	projects := newTestProjects("/tmp", []string{"alpha", "beta", "gamma"})
+	got := filterProjects(projects, "")
+	assertProjectNames(t, got, []string{"alpha", "beta", "gamma"})
+}
+
 func TestFilterProjects_MatchingSubstring(t *testing.T) {
-	projects := []string{"my-project", "other-thing", "project-two"}
+	projects := newTestProjects("/tmp", []string{"my-project", "other-thing", "project-two"})
 	got := filterProjects(projects, "project")
-	if len(got) != 2 {
-		t.Fatalf("expected 2 results, got %d", len(got))
-	}
-	if got[0] != "my-project" || got[1] != "project-two" {
-		t.Errorf("unexpected results: %v", got)
-	}
+	assertProjectNames(t, got, []string{"my-project", "project-two"})
 }
 
 func TestFilterProjects_NoMatch(t *testing.T) {
-	projects := []string{"alpha", "beta"}
+	projects := newTestProjects("/tmp", []string{"alpha", "beta"})
 	got := filterProjects(projects, "zzz")
 	if len(got) != 0 {
 		t.Fatalf("expected 0 results, got %d", len(got))
@@ -46,20 +68,16 @@ func TestFilterProjects_NoMatch(t *testing.T) {
 }
 
 func TestFilterProjects_CaseInsensitive(t *testing.T) {
-	projects := []string{"MyProject", "other"}
+	projects := newTestProjects("/tmp", []string{"MyProject", "other"})
 	got := filterProjects(projects, "myproject")
-	if len(got) != 1 || got[0] != "MyProject" {
-		t.Errorf("expected [MyProject], got %v", got)
-	}
+	assertProjectNames(t, got, []string{"MyProject"})
 
 	got2 := filterProjects(projects, "MYPROJECT")
-	if len(got2) != 1 || got2[0] != "MyProject" {
-		t.Errorf("expected [MyProject], got %v", got2)
-	}
+	assertProjectNames(t, got2, []string{"MyProject"})
 }
 
 func TestFilterProjects_EmptyInput(t *testing.T) {
-	got := filterProjects([]string{}, "test")
+	got := filterProjects([]projectEntry{}, "test")
 	if len(got) != 0 {
 		t.Fatalf("expected 0 results, got %d", len(got))
 	}
@@ -80,7 +98,6 @@ func TestGetProjects_EmptyDir(t *testing.T) {
 
 func TestGetProjects_WithSubdirs(t *testing.T) {
 	dir := t.TempDir()
-	// Create dirs with explicit mod times to verify most-recent-first ordering
 	names := []string{"oldest", "middle", "newest"}
 	baseTime := time.Now().Add(-3 * time.Hour)
 	for i, name := range names {
@@ -89,19 +106,41 @@ func TestGetProjects_WithSubdirs(t *testing.T) {
 		modTime := baseTime.Add(time.Duration(i) * time.Hour)
 		os.Chtimes(p, modTime, modTime)
 	}
+
 	projects, err := getProjects(dir)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(projects) != 3 {
-		t.Fatalf("expected 3 projects, got %d", len(projects))
+
+	assertProjectNames(t, projects, []string{"newest", "middle", "oldest"})
+}
+
+func TestGetProjects_MixedLayouts(t *testing.T) {
+	dir := t.TempDir()
+
+	legacyProject := filepath.Join(dir, "2026-03-08-legacy")
+	dateBucket := filepath.Join(dir, "2026-03-10")
+	nestedProject := filepath.Join(dateBucket, "nested-project")
+	nonBucketProject := filepath.Join(dir, "team")
+	nonBucketChild := filepath.Join(nonBucketProject, "ignored-child")
+
+	os.MkdirAll(legacyProject, 0755)
+	os.MkdirAll(nestedProject, 0755)
+	os.MkdirAll(nonBucketChild, 0755)
+
+	baseTime := time.Now().Add(-4 * time.Hour)
+	os.Chtimes(legacyProject, baseTime, baseTime)
+	os.Chtimes(nonBucketProject, baseTime.Add(1*time.Hour), baseTime.Add(1*time.Hour))
+	os.Chtimes(nestedProject, baseTime.Add(2*time.Hour), baseTime.Add(2*time.Hour))
+
+	projects, err := getProjects(dir)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	// Most recent first
-	expected := []string{"newest", "middle", "oldest"}
-	for i, e := range expected {
-		if projects[i] != e {
-			t.Errorf("index %d: expected %q, got %q (full: %v)", i, e, projects[i], projects)
-		}
+
+	assertProjectNames(t, projects, []string{"2026-03-10/nested-project", "team", "2026-03-08-legacy"})
+	if projects[0].fullPath != nestedProject {
+		t.Errorf("expected nested project path %q, got %q", nestedProject, projects[0].fullPath)
 	}
 }
 
@@ -115,9 +154,7 @@ func TestGetProjects_IgnoresFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(projects) != 1 || projects[0] != "project-dir" {
-		t.Errorf("expected [project-dir], got %v", projects)
-	}
+	assertProjectNames(t, projects, []string{"project-dir"})
 }
 
 func TestGetProjects_CreatesNonExistentDir(t *testing.T) {
@@ -129,7 +166,7 @@ func TestGetProjects_CreatesNonExistentDir(t *testing.T) {
 	if len(projects) != 0 {
 		t.Fatalf("expected 0 projects, got %d", len(projects))
 	}
-	// Verify the directory was created
+
 	info, err := os.Stat(dir)
 	if err != nil {
 		t.Fatalf("directory was not created: %v", err)
@@ -266,6 +303,9 @@ func TestInitialModel(t *testing.T) {
 	if m.search != "" {
 		t.Errorf("expected empty search, got %q", m.search)
 	}
+	if len(m.choices) > 0 && m.choices[0].fullPath == "" {
+		t.Error("expected discovered projects to include a full path")
+	}
 }
 
 func TestInitialModel_EmptyDir(t *testing.T) {
@@ -293,8 +333,8 @@ func TestModelInit(t *testing.T) {
 
 func newTestModel(choices []string, projectsDir string) model {
 	return model{
-		choices:     choices,
-		filtered:    choices,
+		choices:     newTestProjects(projectsDir, choices),
+		filtered:    newTestProjects(projectsDir, choices),
 		cursor:      0,
 		projectsDir: projectsDir,
 	}
@@ -394,6 +434,33 @@ func TestUpdate_Enter_SelectsProject(t *testing.T) {
 	}
 }
 
+func TestUpdate_Enter_SelectsNestedProject(t *testing.T) {
+	dir := t.TempDir()
+	m := newTestModel([]string{"2026-03-10/my-project"}, dir)
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	w.Close()
+	os.Stdout = old
+
+	buf := make([]byte, 1024)
+	n, _ := r.Read(buf)
+	output := string(buf[:n])
+
+	if cmd == nil {
+		t.Fatal("expected quit command, got nil")
+	}
+	expectedPath := filepath.Join(dir, "2026-03-10", "my-project")
+	expectedOutput := fmt.Sprintf("cd %q", expectedPath)
+	if output != expectedOutput {
+		t.Errorf("expected output %q, got %q", expectedOutput, output)
+	}
+}
+
 func TestUpdate_Enter_EmptyList(t *testing.T) {
 	m := newTestModel([]string{}, "/tmp")
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -433,7 +500,7 @@ func TestUpdate_TypeMultipleChars(t *testing.T) {
 	if um2.search != "be" {
 		t.Errorf("expected search %q, got %q", "be", um2.search)
 	}
-	if len(um2.filtered) != 1 || um2.filtered[0] != "beta" {
+	if len(um2.filtered) != 1 || um2.filtered[0].displayName != "beta" {
 		t.Errorf("expected [beta], got %v", um2.filtered)
 	}
 }
@@ -485,8 +552,8 @@ func TestUpdate_Backspace_CursorAdjustment(t *testing.T) {
 func TestUpdate_Backspace_CursorClampToZero(t *testing.T) {
 	// Scenario: all items filtered out, cursor should clamp to 0
 	m := model{
-		choices:  []string{"alpha"},
-		filtered: []string{},
+		choices:  newTestProjects("/tmp", []string{"alpha"}),
+		filtered: []projectEntry{},
 		cursor:   0,
 		search:   "z",
 	}
@@ -522,11 +589,10 @@ func TestUpdate_CtrlN_CreatesProject(t *testing.T) {
 	}
 
 	today := time.Now().Format("2006-01-02")
-	expectedName := fmt.Sprintf("%s-test-project", today)
-	expectedPath := filepath.Join(dir, expectedName)
+	expectedPath := filepath.Join(dir, today, "test-project")
 
-	if !strings.Contains(output, expectedPath) {
-		t.Errorf("expected output to contain %q, got %q", expectedPath, output)
+	if output != fmt.Sprintf("cd %q", expectedPath) {
+		t.Errorf("expected output %q, got %q", fmt.Sprintf("cd %q", expectedPath), output)
 	}
 
 	// Verify directory was created
@@ -613,7 +679,7 @@ func TestView_NoSearchText(t *testing.T) {
 
 func TestView_EmptyNoSearch(t *testing.T) {
 	m := newTestModel([]string{}, "/tmp")
-	m.filtered = []string{}
+	m.filtered = []projectEntry{}
 	view := m.View()
 	if !strings.Contains(view, "No projects found.") {
 		t.Error("view should show 'No projects found.' when no projects and no search")
@@ -623,7 +689,7 @@ func TestView_EmptyNoSearch(t *testing.T) {
 func TestView_EmptyWithSearch(t *testing.T) {
 	m := newTestModel([]string{}, "/tmp")
 	m.search = "xyz"
-	m.filtered = []string{}
+	m.filtered = []projectEntry{}
 	view := m.View()
 	if !strings.Contains(view, "C-n") {
 		t.Error("view should mention C-n to create a new project when search has no results")
@@ -655,8 +721,8 @@ func TestView_SecondItemSelected(t *testing.T) {
 func TestUpdate_Backspace_CursorExceedsFiltered(t *testing.T) {
 	// After backspace, filtered has fewer items than cursor position
 	m := model{
-		choices:  []string{"abc", "abd", "xyz"},
-		filtered: []string{"abc"},
+		choices:  newTestProjects("/tmp", []string{"abc", "abd", "xyz"}),
+		filtered: newTestProjects("/tmp", []string{"abc"}),
 		cursor:   2,
 		search:   "abc",
 	}
@@ -671,8 +737,8 @@ func TestUpdate_Backspace_CursorExceedsFiltered(t *testing.T) {
 func TestUpdate_Backspace_FilteredBecomesEmpty(t *testing.T) {
 	// After backspace, search still has chars but nothing matches → cursor clamped to 0
 	m := model{
-		choices:     []string{"xyz"},
-		filtered:    []string{},
+		choices:     newTestProjects("/tmp", []string{"xyz"}),
+		filtered:    []projectEntry{},
 		cursor:      0,
 		search:      "ab",
 		projectsDir: "/tmp",
